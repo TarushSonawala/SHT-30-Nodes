@@ -8,12 +8,23 @@
 
 /* ================= CONFIG ================= */
 
-#define NODE_ID "node_2"
+#define NODE_ID "node_3"
 
-#define WIFI_SSID "Laugh_Tale_2.4"
-#define WIFI_PASS "onepiece"
+struct WiFiCred {
+  const char* ssid;
+  const char* pass;
+};
 
-#define SAMPLE_INTERVAL_MS   60000UL
+WiFiCred wifiList[] = {
+  { "Laugh_Tale_2.4", "onepiece" },
+  { "KinesthetIQ_2.4",   "KinesthetIQ@01" },
+  { "Demo_SSID",      "Demo_PWD" }
+};
+
+const int WIFI_COUNT = sizeof(wifiList) / sizeof(wifiList[0]);
+
+
+#define SAMPLE_INTERVAL_MS   1000UL
 #define WIFI_RETRY_MS        3000UL
 #define WIFI_SCAN_MS        15000UL
 #define NTP_RETRY_MS         5000UL
@@ -37,6 +48,7 @@ unsigned long lastHeartbeat = 0;
 unsigned long lastWiFiAttempt = 0;
 unsigned long lastWiFiScan = 0;
 unsigned long lastNtpAttempt = 0;
+int currentWiFiIndex = -1;
 
 bool wifiWasConnected = false;
 bool timeValid = false;
@@ -63,16 +75,38 @@ String getDateTime12Hour() {
 
 /* ============ WIFI SCAN ============ */
 
-void scanWiFi() {
+int findBestKnownNetwork() {
   LOG("WIFI", "Scanning networks...");
   int n = WiFi.scanNetworks();
+  int bestIndex = -1;
+  int bestRSSI = -999;
+
   for (int i = 0; i < n; i++) {
-    LOGF("WIFI", "%d: %s | RSSI %d",
-         i + 1,
-         WiFi.SSID(i).c_str(),
-         WiFi.RSSI(i));
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+
+    LOGF("WIFI", "%d: %s | RSSI %d", i + 1, ssid.c_str(), rssi);
+
+    for (int j = 0; j < WIFI_COUNT; j++) {
+      if (ssid == wifiList[j].ssid) {
+        if (rssi > bestRSSI) {
+          bestRSSI = rssi;
+          bestIndex = j;
+        }
+      }
+    }
   }
+
+  if (bestIndex >= 0) {
+    LOGF("WIFI", "Best known SSID found: %s (RSSI %d)",
+         wifiList[bestIndex].ssid, bestRSSI);
+  } else {
+    LOG("WIFI", "No known SSIDs found");
+  }
+
+  return bestIndex;
 }
+
 
 /* ============ WIFI MAINTAIN ============ */
 
@@ -88,20 +122,31 @@ void maintainWiFi() {
 
   wifiWasConnected = false;
 
+  // Periodic scan
   if (millis() - lastWiFiScan > WIFI_SCAN_MS) {
     lastWiFiScan = millis();
-    scanWiFi();
+    currentWiFiIndex = findBestKnownNetwork();
   }
 
+  // Retry connect timer
   if (millis() - lastWiFiAttempt < WIFI_RETRY_MS) return;
   lastWiFiAttempt = millis();
 
-  LOG("WIFI", "Attempting WiFi connection...");
+  if (currentWiFiIndex < 0) return;
+
+  LOGF("WIFI", "Attempting connection to %s",
+       wifiList[currentWiFiIndex].ssid);
+
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
   delay(50);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  WiFi.begin(
+    wifiList[currentWiFiIndex].ssid,
+    wifiList[currentWiFiIndex].pass
+  );
 }
+
 
 /* ============ TIME MAINTAIN (NTPClient) ============ */
 
@@ -367,7 +412,7 @@ void setup() {
   LOG("BOOT", "ESP32 starting");
   LOG("BOOT", NODE_ID);
 
-  Wire.begin(5, 6);
+  Wire.begin(6, 7);
   LittleFS.begin(true);
   sht30.begin(0x44);
 
