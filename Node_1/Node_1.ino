@@ -5,10 +5,11 @@
 #include <LittleFS.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
+#include <ESPmDNS.h>
 
 /* ================= CONFIG ================= */
 
-#define NODE_ID "node_3"
+#define NODE_ID "node_4"
 
 struct WiFiCred {
   const char* ssid;
@@ -24,9 +25,9 @@ WiFiCred wifiList[] = {
 const int WIFI_COUNT = sizeof(wifiList) / sizeof(wifiList[0]);
 
 
-#define SAMPLE_INTERVAL_MS   1000UL
-#define WIFI_RETRY_MS        3000UL
-#define WIFI_SCAN_MS        15000UL
+#define SAMPLE_INTERVAL_MS   60000UL
+#define WIFI_RETRY_MS        1000UL
+#define WIFI_SCAN_MS        3000UL
 #define NTP_RETRY_MS         5000UL
 
 #define LOG_FILE "/log.csv"
@@ -53,6 +54,8 @@ int currentWiFiIndex = -1;
 bool wifiWasConnected = false;
 bool timeValid = false;
 bool loggingEnabled = true;
+bool mdnsStarted = false;
+
 String getDateTime12Hour() {
   time_t raw = timeClient.getEpochTime();
   struct tm *ti = localtime(&raw);
@@ -65,13 +68,13 @@ String getDateTime12Hour() {
 /* ============ LOG MACROS ============ */
 
 #define LOG(tag, msg) do { \
-  Serial.print("["); Serial.print(tag); Serial.print("] "); Serial.println(msg); \
-} while (0)
+    Serial.print("["); Serial.print(tag); Serial.print("] "); Serial.println(msg); \
+  } while (0)
 
 #define LOGF(tag, fmt, ...) do { \
-  char buf[128]; snprintf(buf, sizeof(buf), fmt, __VA_ARGS__); \
-  Serial.print("["); Serial.print(tag); Serial.print("] "); Serial.println(buf); \
-} while (0)
+    char buf[128]; snprintf(buf, sizeof(buf), fmt, __VA_ARGS__); \
+    Serial.print("["); Serial.print(tag); Serial.print("] "); Serial.println(buf); \
+  } while (0)
 
 /* ============ WIFI SCAN ============ */
 
@@ -111,14 +114,29 @@ int findBestKnownNetwork() {
 /* ============ WIFI MAINTAIN ============ */
 
 void maintainWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!wifiWasConnected) {
-      wifiWasConnected = true;
-      LOGF("WIFI", "Connected to SSID: %s", WiFi.SSID().c_str());
-      LOGF("WIFI", "IP address: %s", WiFi.localIP().toString().c_str());
+if (WiFi.status() == WL_CONNECTED) {
+  if (!wifiWasConnected) {
+    wifiWasConnected = true;
+
+    LOGF("WIFI", "Connected to SSID: %s", WiFi.SSID().c_str());
+    LOGF("WIFI", "IP address: %s", WiFi.localIP().toString().c_str());
+
+    // ----- START mDNS -----
+    if (!mdnsStarted) {
+if (MDNS.begin(NODE_ID)) {
+  mdnsStarted = true;
+  MDNS.addService("http", "tcp", 80);
+  LOG("MDNS", "mDNS started");
+}
+else {
+        LOG("MDNS", "mDNS failed");
+      }
     }
-    return;
+    // ----------------------
   }
+  return;
+}
+
 
   wifiWasConnected = false;
 
@@ -162,14 +180,14 @@ void maintainTime() {
   lastNtpAttempt = millis();
 
   LOG("TIME", "Attempting NTP sync...");
-if (timeClient.update()) {
-  unsigned long epoch = timeClient.getEpochTime();
-  if (epoch > 1700000000UL) {
-    timeValid = true;
-    LOG("TIME", "Time synchronized");
-    LOGF("TIME", "Now: %s", getDateTime12Hour().c_str());
+  if (timeClient.update()) {
+    unsigned long epoch = timeClient.getEpochTime();
+    if (epoch > 1700000000UL) {
+      timeValid = true;
+      LOG("TIME", "Time synchronized");
+      LOGF("TIME", "Now: %s", getDateTime12Hour().c_str());
+    }
   }
-}
 
 }
 
@@ -183,11 +201,7 @@ void logData(float t, float h) {
     return;
   }
 
-  unsigned long epoch = timeClient.getEpochTime();
-  if (epoch < 1700000000UL) {
-    LOG("TIME", "Epoch invalid → skipping log");
-    return;
-  }
+  String ts = getDateTime12Hour();
 
   File f = LittleFS.open(LOG_FILE, "a");
   if (!f) {
@@ -195,10 +209,12 @@ void logData(float t, float h) {
     return;
   }
 
-  f.printf("%lu,%.2f,%.2f\n", epoch, t, h);
+  f.printf("%s,%.2f,%.2f\n", ts.c_str(), t, h);
   f.close();
 
-  LOGF("LOG", "Saved → ts=%lu temp=%.2f hum=%.2f", epoch, t, h);
+  LOGF("LOG", "Saved → %s | temp=%.2f hum=%.2f",
+       ts.c_str(), t, h);
+
 }
 
 /* ============ SENSOR ============ */
@@ -224,10 +240,17 @@ void handleRoot() {
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>ESP32 Sensor Graph</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
+
 <body>
+<h3>
+  Temp: <span id="temp">--</span> °C |
+  Humidity: <span id="hum">--</span> %
+</h3>
+
   <h2>ESP32 Temperature & Humidity</h2>
   <canvas id="chart" width="400" height="200"></canvas>
 
@@ -265,14 +288,22 @@ void handleRoot() {
         }
       }
     });
+async function loadCurrent() {
+  const res = await fetch('/current');
+  const d = await res.json();
+  document.getElementById('temp').innerText = d.t.toFixed(2);
+  document.getElementById('hum').innerText = d.h.toFixed(2);
+}
+
+loadCurrent();
+setInterval(loadCurrent, 2000);
 
     async function loadData() {
       const res = await fetch('/data');
       const data = await res.json();
 
-      chart.data.labels = data.map(d =>
-        new Date(d.ts * 1000).toLocaleTimeString()
-      );
+chart.data.labels = data.map(d => d.ts);
+
       chart.data.datasets[0].data = data.map(d => d.t);
       chart.data.datasets[1].data = data.map(d => d.h);
       chart.update();
@@ -402,6 +433,22 @@ void handleUART() {
     }
   }
 }
+void handleCurrent() {
+  float t = sht30.readTemperature();
+  float h = sht30.readHumidity();
+
+  if (isnan(t) || isnan(h)) {
+    server.send(500, "application/json", "{}");
+    return;
+  }
+
+  String json = "{";
+  json += "\"t\":" + String(t, 2) + ",";
+  json += "\"h\":" + String(h, 2);
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
 
 /* ============ SETUP ============ */
 
@@ -421,12 +468,16 @@ void setup() {
 
   timeClient.begin();
 
-  server.on("/", handleRoot);
-  server.on("/download", handleDownload);
-  server.on("/clear", handleClear);
-  server.begin();
+server.on("/", handleRoot);
+server.on("/data", handleData);
+server.on("/current", handleCurrent);
+server.on("/download", handleDownload);
+server.on("/clear", handleClear);
+server.begin();
+
 
   LOG("WEB", "Web server started");
+  
 }
 
 /* ============ LOOP ============ */
